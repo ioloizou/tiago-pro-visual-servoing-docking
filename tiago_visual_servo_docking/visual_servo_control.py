@@ -25,8 +25,11 @@ class VisualServoControlNode(Node):
         self.declare_parameter('kp_angular', 1.5)
         self.declare_parameter('max_linear_vel', 0.3)
         self.declare_parameter('max_angular_vel', 0.8)
-        self.declare_parameter('desired_dock_distance', 0.5)
-        self.declare_parameter('position_tolerance', 0.03)
+        # Target pose expressed as an offset from the AprilTag frame.
+        self.declare_parameter('target_x', 3.0)
+        self.declare_parameter('target_y', 0.0)
+        self.declare_parameter('target_yaw', 0.0)
+        self.declare_parameter('position_tolerance', 0.05)
         self.declare_parameter('yaw_tolerance', 0.05)
         self.declare_parameter('april_tag_timeout', 1.0)
 
@@ -38,7 +41,9 @@ class VisualServoControlNode(Node):
         self.kp_angular = self.get_parameter('kp_angular').value
         self.max_linear_vel = self.get_parameter('max_linear_vel').value
         self.max_angular_vel = self.get_parameter('max_angular_vel').value
-        self.desired_dock_distance = self.get_parameter('desired_dock_distance').value
+        self.target_x = self.get_parameter('target_x').value
+        self.target_y = self.get_parameter('target_y').value
+        self.target_yaw = self.get_parameter('target_yaw').value
         self.position_tolerance = self.get_parameter('position_tolerance').value
         self.yaw_tolerance = self.get_parameter('yaw_tolerance').value
         self.april_tag_timeout = self.get_parameter('april_tag_timeout').value
@@ -49,7 +54,7 @@ class VisualServoControlNode(Node):
             depth=1,
         )
 
-        self.target_pose: Optional[Pose] = None
+        self.april_tag_pose: Optional[Pose] = None
         self.last_april_tag_stamp = None
         self.docked = False
 
@@ -65,7 +70,7 @@ class VisualServoControlNode(Node):
         self.get_logger().info('Visual servo control node started (Omnidirectional with X-Axis Hack).')
 
     def april_tag_pose_callback(self, msg):
-        self.target_pose = msg.pose
+        self.april_tag_pose = msg.pose
         self.last_april_tag_stamp = self.get_clock().now()
 
     def april_tag_is_stale(self):
@@ -75,42 +80,21 @@ class VisualServoControlNode(Node):
         return elapsed > self.april_tag_timeout
 
     def compute_error(self) -> tuple[float, float, float]:
-        assert self.target_pose is not None
-        p = self.target_pose.position
-        q = self.target_pose.orientation
-        
-        # 1. Extract the tag's X-axis vector in the camera frame
-        tag_x_x = 1.0 - 2.0 * (q.y**2 + q.z**2)
-        tag_x_z = 2.0 * (q.x * q.z - q.w * q.y)
+        assert self.april_tag_pose is not None
+        p = self.april_tag_pose.position
+        q = self.april_tag_pose.orientation
 
-        # The face normal points opposite to the X-axis (-X)
-        normal_x = -tag_x_x
-        normal_z = -tag_x_z
-
-        # 2. Desired camera position: desired_dock_distance along the face normal
-        desired_x = p.x + self.desired_dock_distance * normal_x
-        desired_z = p.z + self.desired_dock_distance * normal_z
-
-        # 3. Decoupled Cartesian errors
         # Camera Z is forward (Robot X). Camera X is right (Robot Y is left).
-        error_x = desired_z
-        error_y = -desired_x  # Negative: tag to the right (x > 0) -> strafe right (y < 0)
-
-        # 4. Yaw error: We want the camera to face the tag squarely.
-        # This means aligning the camera's forward Z-axis with the tag's X-axis (which points inward).
-        yaw_error = math.atan2(-tag_x_x, -tag_x_z)
+        error_x = p.z - self.target_x
+        error_y = -p.x + self.target_y
         
-        # Normalize yaw error to [-pi, pi] to prevent the robot spinning the long way around
-        yaw_error = (yaw_error + math.pi) % (2 * math.pi) - math.pi
-
-        return 0, error_y, 0
+        return error_x, error_y, 0
 
     def compute_control(self, error_x, error_y, yaw_error):
         twist = Twist()
-        total_distance = math.hypot(error_x, error_y)
 
         # Only return True if BOTH position AND yaw are perfect at the exact same time
-        if total_distance <= self.position_tolerance and abs(yaw_error) <= self.yaw_tolerance:
+        if abs(error_x) <= self.position_tolerance and abs(error_y) <= self.position_tolerance and abs(yaw_error) <= self.yaw_tolerance:
             self.get_logger().info('DOCKED!')
             return twist, True
 
@@ -137,7 +121,7 @@ class VisualServoControlNode(Node):
         self.cmd_vel_pub.publish(Twist())
 
     def control_loop(self):
-        if self.target_pose is None or self.april_tag_is_stale():
+        if self.april_tag_pose is None or self.april_tag_is_stale():
             self.stop_robot()
             self.publish_status('SEARCHING')
             self.get_logger().warn('SEARCHING: no AprilTag data (never received or stale)',
