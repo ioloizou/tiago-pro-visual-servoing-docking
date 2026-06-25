@@ -10,10 +10,16 @@ from geometry_msgs.msg import Pose, PoseStamped, Twist
 from std_msgs.msg import String
 
 
-def quaternion_to_yaw(q):
-    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-    return math.atan2(siny_cosp, cosy_cosp)
+def get_camera_yaw(q):
+    """
+    Panning yaw of the tag about the camera's vertical axis, on the X-Z floor plane.
+    Uses the tag's X-axis as the facing direction (the X-Axis Hack). When the tag
+    faces the camera head-on, the facing axis points back at the camera (-Z_cam),
+    so this returns 0.
+    """
+    nx = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)   # tag X-axis, X component (camera frame)
+    nz = 2.0 * (q.x * q.z - q.w * q.y)         # tag X-axis, Z component (camera frame)
+    return math.atan2(nx, -nz)                 # head-on -> atan2(0, 1) = 0
 
 
 class VisualServoControlNode(Node):
@@ -21,10 +27,10 @@ class VisualServoControlNode(Node):
         super().__init__('visual_servo_control_node')
 
         self.declare_parameter('control_frequency', 20.0)
-        self.declare_parameter('kp_linear', 0.5)
-        self.declare_parameter('kp_angular', 1.5)
-        self.declare_parameter('max_linear_vel', 0.3)
-        self.declare_parameter('max_angular_vel', 0.8)
+        self.declare_parameter('kp_linear', 0.15)
+        self.declare_parameter('kp_angular', 0.3)
+        self.declare_parameter('max_linear_vel', 0.1)
+        self.declare_parameter('max_angular_vel', 0.3)
         # Target pose expressed as an offset from the AprilTag frame.
         self.declare_parameter('target_x', 3.0)
         self.declare_parameter('target_y', 0.0)
@@ -87,8 +93,16 @@ class VisualServoControlNode(Node):
         # Camera Z is forward (Robot X). Camera X is right (Robot Y is left).
         error_x = p.z - self.target_x
         error_y = -p.x + self.target_y
-        
-        return error_x, error_y, 0
+
+        # Yaw error normalized to [-pi, pi]
+        current_yaw = get_camera_yaw(q)
+        yaw_error = current_yaw - self.target_yaw
+        while yaw_error > math.pi:
+            yaw_error -= 2 * math.pi
+        while yaw_error < -math.pi:
+            yaw_error += 2 * math.pi
+
+        return error_x, error_y, yaw_error
 
     def compute_control(self, error_x, error_y, yaw_error):
         twist = Twist()
